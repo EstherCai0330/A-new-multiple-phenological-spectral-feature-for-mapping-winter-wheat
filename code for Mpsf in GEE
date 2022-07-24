@@ -1,0 +1,123 @@
+// Input winter wheat ROIs and Beijing boundary
+var BeijingROI = ee.FeatureCollection("users/ec2001111/Samples/Beijing2"),
+    Beijing = ee.FeatureCollection("users/ec2001111/beijing");
+ 
+// Cloud masking fuction
+function maskS2clouds(image) {
+  var qa = image.select('QA60')
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+            qa.bitwiseAnd(cirrusBitMask).eq(0))
+
+  return image.updateMask(mask).divide(10000)
+      .select("B.*")
+      .copyProperties(image, ["system:time_start"])
+}
+ 
+// Identify and combine 3 phenological periods
+var collectionsoil19 = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2019-09-20', '2019-11-01')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 70))
+    .filterBounds(Beijing).map(maskS2clouds)
+var collectionsoil18 = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2018-09-20', '2019-11-01')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 70))
+    .filterBounds(Beijing).map(maskS2clouds)
+var collectiongrowing20 = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2020-02-10', '2020-04-10')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 70))
+    .filterBounds(Beijing).map(maskS2clouds)
+var collectiongrowing19 = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2019-02-10', '2019-04-10')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 70))
+    .filterBounds(Beijing).map(maskS2clouds)
+var collectionharvest20 = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2020-5-20', '2020-6-30')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 70))
+    .filterBounds(Beijing).map(maskS2clouds)
+var collectionharvest19 = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate('2019-5-20', '2019-6-30')
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 70))
+    .filterBounds(Beijing).map(maskS2clouds)
+var collectionsoil=collectionsoil19.merge(collectionsoil18);
+var collectiongrowing=collectiongrowing20.merge(collectiongrowing19);
+var collectionharvest=collectionharvest20.merge(collectionharvest19);
+
+// Calculate the spectral indices
+// BSI
+var BSI = function(image) {
+  return image.expression('(float(b("B11") + b("B4"))-float(b("B8") + b("B2"))) / (float(b("B11") + b("B4"))+float(b("B8") + b("B2")))').rename('bsi');
+};
+// NDVI
+var NDVI = function(image) {
+  return image.expression('float(b("B8") - b("B4")) / float(b("B8") + b("B4"))').rename('ndvi');
+};
+// NDVI6
+var NDVI6 = function(image) {
+  return image.expression('float(6 * b("B8") - b("B4")) / float(b("B8") + 6 * b("B4"))').rename('ndvi6');
+};
+// GNDVI
+var GNDVI = function(image) {
+  return image.expression('float(b("B8") - b("B3")) / float(b("B8") + b("B3"))').rename('gndvi');
+};
+// EVI
+var EVI = function(image) {
+  return image.expression('2.5*(float(b("B8") - b("B4")) / (float(b("B8") +1+(6*b("B4"))-(7.5*b("B2")))))').rename('EVI');
+};
+//PSRI
+var PSRI = function(image) {
+  return image.expression('(float(b("B4"))-float(b("B3"))) / float(b("B8A"))').rename('PSRI');
+};
+
+
+// Median composition
+var imgndvi=collectiongrowing.map(NDVI).median();
+var imgndvi6=collectiongrowing.map(NDVI6).median();
+var imggndvi=collectiongrowing.map(GNDVI).median();
+var imgevi=collectiongrowing.map(EVI).median();
+var imgpsri=collectionharvest.map(PSRI).median();
+var imgBSI=collectionsoil.map(BSI).median();
+
+// Composite image
+var composite=imgndvi.addBands(imgndvi6).addBands(imggndvi).addBands(imgevi).addBands(imgpsri).addBands(imgBSI);
+
+// Create OCSVM classifier 
+var classifier = ee.Classifier.libsvm({
+  svmType: 'ONE_CLASS', 
+  kernelType: 'RBF',
+  gamma: 5,
+  nu:0.1
+});
+
+var training = composite.sampleRegions({
+  collection: BeijingROI,
+  properties: ['class'],
+  scale: 10
+});
+
+
+var trained = classifier.train(training, 'class');
+var classified = composite.classify(trained);
+
+
+// Set visual parameters
+var mapViz = {
+  min:0,
+  max:1,
+  scale:10,
+  palette:["green","black"]
+}; 
+
+var result = classified.updateMask(classified.neq(1)).clip(Beijing);
+Map.addLayer(result,mapViz,"Winter wheat");
+Map.setCenter(116.3969,39.9015, 9); 
+
+// Export.image.toDrive({
+//         image: classified,
+//         description: "Mpsf map in Beijing",
+//         scale: 10,
+//         region: Beijing,
+//         maxPixels:2e11
+//         })
